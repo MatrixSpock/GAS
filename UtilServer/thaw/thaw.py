@@ -52,8 +52,7 @@ def get_s3_key_result_file(archive_id):
         if 'Items' in response and len(response['Items']) > 0:
             item = response['Items'][0]
             print(f"item: {item}")
-            s3_key_result_file = item['s3_key_result_file']
-            return s3_key_result_file
+            return item
         else:
             print(f"No matching item found for archive_id: {archive_id}")
             return None
@@ -84,20 +83,22 @@ def poll_sqs():
                     print(f"sns_message_body: {sns_message_body}")
 
 
-                    job_id = sns_message_body['JobId']
+                    glacier_job_id = sns_message_body['JobId']
                     archive_id = sns_message_body['ArchiveId']
 
-                    print(f"Retrieving restored archive for job_id: {job_id}")
+                    print(f"Retrieving restored archive for glacier_job_id: {glacier_job_id}")
                     job_output = glacier.get_job_output(
                         vaultName=vault_name,
                         accountId=aws_account_id,
-                        jobId=job_id
+                        jobId=glacier_job_id
                     )
 
                     # Get the s3_key_result_file from DynamoDB
-                    s3_key_result_file = get_s3_key_result_file(archive_id)
-                    if s3_key_result_file is None:
+                    item = get_s3_key_result_file(archive_id)
+                    if item is None:
                         continue  # Skip this message if no matching item found
+
+                    s3_key_result_file = item['s3_key_result_file']
 
                     # Save the restored archive to a temporary file
                     with tempfile.TemporaryDirectory() as temp_dir:
@@ -109,6 +110,20 @@ def poll_sqs():
                         # Upload the file to the specified S3 bucket
                         s3.upload_file(file_path, results_bucket, s3_key_result_file)
                         print(f"File uploaded to S3 bucket: {results_bucket}, key: {s3_key_result_file}")
+
+                        # Delete the file from Glacier
+                        glacier.delete_archive(
+                            vaultName=vault_name,
+                            archiveId=archive_id
+                        )
+                        print(f"Deleted archive from Glacier vault: {vault_name}, archive ID: {archive_id}")
+
+                        # Update the DynamoDB item to remove results_file_archive_id and glacier_restore_job_id
+                        table.update_item(
+                            Key={'job_id': item['job_id']},
+                            UpdateExpression="REMOVE results_file_archive_id, glacier_restore_job_id"
+                        )
+                        print(f"Updated DynamoDB item to remove archive ID and restore job ID for job_id: {item['job_id']}")
 
                     # Delete the processed message from the SQS queue
                     sqs.delete_message( 
