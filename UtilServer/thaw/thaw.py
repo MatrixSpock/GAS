@@ -71,8 +71,8 @@ def poll_sqs():
             MessageAttributeNames=['All']
         )
 
-        print(f"SQS Response: {response}")
         if 'Messages' in response:
+            print(f"SQS Response: {response}")
             for message in response['Messages']:
                 try:
                     print(f"message: {message}")
