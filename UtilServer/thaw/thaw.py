@@ -11,111 +11,116 @@ import boto3
 import json
 import os
 import sys
+import tempfile
 from botocore.exceptions import ClientError, NoCredentialsError
 from configparser import ConfigParser
 
-# AWS Configuration
-aws_region = 'us-east-1'
 
 # Load configuration
 config = ConfigParser()
 config.read('thaw_config.ini')
 
+# AWS Configuration
+aws_region = config.get('aws', 'aws_region_name')
+aws_account_id = config.get('aws', 'account_id')
+results_bucket = config.get('aws', 'results_bucket')
+
+# Glacier Configuration
+vault_name = config.get('glacier', 'vault_name')
+
 # SQS Configuration
-sqs_queue_url = config.get('sqs', 'queue_url')
+thaw_queue_url = config.get('sqs', 'glacier_thaw_queue_url')
 
 # Initialize AWS clients
 sqs = boto3.client('sqs', region_name=aws_region)
 glacier = boto3.client('glacier', region_name=aws_region)
 s3 = boto3.client('s3', region_name=aws_region)
+dynamodb = boto3.resource('dynamodb', region_name=aws_region)
 
-# SNS Message is a string 
+#DynamoDB
+table = dynamodb.Table('jcorning_annotations')
+
+
+def get_s3_key_result_file(archive_id):
+    """Retrieve the s3_key_result_file from DynamoDB using the archive_id."""
+    try:
+        response = table.query(
+            IndexName='results_file_archive_id_index',
+            KeyConditionExpression=boto3.dynamodb.conditions.Key('results_file_archive_id').eq(archive_id)
+        )
+
+        if 'Items' in response and len(response['Items']) > 0:
+            item = response['Items'][0]
+            print(f"item: {item}")
+            s3_key_result_file = item['s3_key_result_file']
+            return s3_key_result_file
+        else:
+            print(f"No matching item found for archive_id: {archive_id}")
+            return None
+
+    except ClientError as e:
+        print(f"Error querying DynamoDB: {e}")
+        return None
+    
 def poll_sqs():
     """Poll the SQS queue for job completion messages and process them."""
     while True:
         response = sqs.receive_message(
-            QueueUrl=sqs_queue_url,
+            QueueUrl=thaw_queue_url,
             MaxNumberOfMessages=10,
             WaitTimeSeconds=20,
             MessageAttributeNames=['All']
         )
 
+        print(f"SQS Response: {response}")
         if 'Messages' in response:
             for message in response['Messages']:
-                print("Received message:", json.dumps(message, indent=4))
                 try:
-                    message_body = json.loads(message['Body'])
-                except json.JSONDecodeError as e:
-                    print(f"Error decoding JSON from message body: {e}")
-                    continue  # Skip this message
+                    print(f"message: {message}")
+                    # Parse the SNS message
+                    sns_message = json.loads(message['Body'])
+                    print(f"sns_message: {sns_message}")
+                    sns_message_body = json.loads(sns_message['Message'])
+                    print(f"sns_message_body: {sns_message_body}")
 
-                # Print the message body to debug the structure
-                print("Message Body:", json.dumps(message_body, indent=4))
+                    # user_info = json.loads(actual_message['default'])
+                    # user_id = user_info['user_id']
 
-                # Extract the actual message which contains job details
-                if 'Message' not in message_body:
-                    print("Error: 'Message' key not found in message body. Skipping message.")
-                    continue  # Skip this message
+                    job_id = sns_message_body['jobId']
+                    archive_id = sns_message_body['ArchiveId']
 
-                # Extract and parse the nested message
-                actual_message_str = message_body['Message']
-                print("Actual Message String:", actual_message_str)
-                
-                # Check if the actual message is JSON
-                try:
-                    actual_message = json.loads(actual_message_str)
-                    print(f"Check if the actual message is JSON: {actual_message}")
-                except json.JSONDecodeError:
-                    print(f"The actual message is not a JSON - actual_message_str: {actual_message_str}")
+                    print(f"Retrieving restored archive for job_id: {job_id}")
+                    job_output = glacier.get_job_output(
+                        vaultName=vault_name,
+                        accountId=aws_account_id,
+                        jobId=job_id
+                    )
+
+                    # Get the s3_key_result_file from DynamoDB
+                    s3_key_result_file = get_s3_key_result_file(archive_id)
+                    if s3_key_result_file is None:
+                        continue  # Skip this message if no matching item found
+
+                    # Save the restored archive to a temporary file
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        file_path = os.path.join(temp_dir, os.path.basename(s3_key_result_file))
+                        with open(file_path, 'wb') as file:
+                            file.write(job_output['body'].read())
+                        print(f"Restored archive saved to temporary file: {file_path}")
+
+                        # Upload the file to the specified S3 bucket
+                        s3.upload_file(file_path, results_bucket, s3_key_result_file)
+                        print(f"File uploaded to S3 bucket: {results_bucket}, key: {s3_key_result_file}")
+
+                    # Delete the processed message from the SQS queue
                     sqs.delete_message(
-                        QueueUrl=sqs_queue_url,
+                        QueueUrl=thaw_queue_url,
                         ReceiptHandle=message['ReceiptHandle']
-                    )   
+                    )
+
+                except ClientError as e:
+                    print(f"Error retrieving job output: {e}")
                     continue  # Skip this message
-
-                # Check if the message is from Glacier
-                print("Check if the message is from Glacier")
-                if 'jobId' in actual_message:
-                    try:
-                        # Message from Glacier (job completion)
-                        job_id = actual_message['jobId']
-                        archive_id = actual_message['ArchiveId']
-                        vault_name = actual_message['VaultName']
-
-                        # Download the restored archive from Glacier
-                        print(f"Retrieving restored archive for job_id: {job_id}")
-                        job_output = glacier.get_job_output(
-                            vaultName=vault_name,
-                            jobId=job_id
-                        )
-                        print(f"Download the restored archive from Glacier - job_output: {job_output}")
-                        archive_content = job_output['body'].read()
-
-                        # Save the restored archive to S3
-                        s3_key = f'restored/{archive_id}'
-                        s3.put_object(
-                            Bucket=config.get('s3', 'results_bucket'),
-                            Key=s3_key,
-                            Body=archive_content
-                        )
-                        print(f"Restored archive saved to S3 at key: {s3_key}")
-
-                    except ClientError as e:
-                        print(f"Error retrieving job output: {e}")
-                        continue  # Skip this message
-                else:
-                    print(f"Message not from Glacier: {actual_message}")
-                    sqs.delete_message(
-                        QueueUrl=sqs_queue_url,
-                        ReceiptHandle=message['ReceiptHandle']
-                    )   
-
-                print(f"After processing, delete the message from the queue")
-                print(f"SQS Queue URL: {sqs_queue_url}")
-                sqs.delete_message(
-                    QueueUrl=sqs_queue_url,
-                    ReceiptHandle=message['ReceiptHandle']
-                )
 
         else:
             print("No messages in queue. Waiting...")
