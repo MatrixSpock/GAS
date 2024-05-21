@@ -83,10 +83,8 @@ def poll_sqs():
                     sns_message_body = json.loads(sns_message['Message'])
                     print(f"sns_message_body: {sns_message_body}")
 
-                    # user_info = json.loads(actual_message['default'])
-                    # user_id = user_info['user_id']
 
-                    job_id = sns_message_body['jobId']
+                    job_id = sns_message_body['JobId']
                     archive_id = sns_message_body['ArchiveId']
 
                     print(f"Retrieving restored archive for job_id: {job_id}")
@@ -113,7 +111,7 @@ def poll_sqs():
                         print(f"File uploaded to S3 bucket: {results_bucket}, key: {s3_key_result_file}")
 
                     # Delete the processed message from the SQS queue
-                    sqs.delete_message(
+                    sqs.delete_message( 
                         QueueUrl=thaw_queue_url,
                         ReceiptHandle=message['ReceiptHandle']
                     )
