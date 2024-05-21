@@ -1,0 +1,4 @@
+
+# Ignore Environment Files
+*.ini
+*.env
