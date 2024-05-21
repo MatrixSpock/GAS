@@ -335,7 +335,7 @@ def subscribe():
 
     # Send message to restore queue
     app.logger.info(f"Sending message to restore queue for user {user_id}")
-    app.logger.info(f"AWS_SNS_JOB_RESTORE_TOPIC: {AWS_SNS_JOB_RESTORE_TOPIC}")
+    app.logger.info(f"AWS_SNS_JOB_RESTORE_TOPIC: {app.config['AWS_SNS_JOB_RESTORE_TOPIC']}")
     sns = boto3.client('sns') 
     sns.publish(
         TopicArn=app.config['AWS_SNS_JOB_RESTORE_TOPIC'],

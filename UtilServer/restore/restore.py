@@ -73,7 +73,9 @@ def poll_sqs():
                     print(f"Error decoding actual message: {e}")
                     continue
 
-                user_id = actual_message.get('user_id')
+                user_info = json.loads(actual_message['default'])
+                user_id = user_info['user_id']
+
                 if not user_id:
                     print("Error: 'user_id' key not found in actual message. Skipping message.")
                     continue
@@ -115,7 +117,7 @@ def restore_user_data(user_id):
         if 'results_file_archive_id' in item:
             initiate_glacier_retrieval(item)
         else:
-            print(f"No results_file_archive_id found for item with user_id: {user_id}")
+            print(f"No results_file_archive_id found for item with user_id: {user_id} job_id: {item['job_id']}")
 
 def initiate_glacier_retrieval(item):
     archive_id = item['results_file_archive_id']
