@@ -1,0 +1,4 @@
+2024-05-20 04:04:48,674 INFO: Received request for /annotate/job 
+2024-05-20 04:04:48,686 INFO: Persisting job 65fe6376-cf8a-4ed6-99ed-09e9b58bf8fd to DynamoDB 
+2024-05-20 04:04:48,718 INFO: Sending message to request queue for job 65fe6376-cf8a-4ed6-99ed-09e9b58bf8fd 
+2024-05-20 04:04:48,760 INFO: Message sent to request queue: 65fe6376-cf8a-4ed6-99ed-09e9b58bf8fd 

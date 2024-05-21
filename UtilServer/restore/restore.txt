@@ -1,0 +1,175 @@
+# restore.py
+#
+# NOTE: This file lives on the Utils instance
+#
+# Copyright (C) 2011-2019 Vas Vasiliadis
+# University of Chicago
+##
+__author__ = 'Vas Vasiliadis <vas@uchicago.edu>'
+
+import boto3
+import json
+import os
+import sys
+import time
+from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError, NoCredentialsError
+from configparser import ConfigParser
+
+# Load configuration
+config = ConfigParser()
+config.read('restore_config.ini')
+
+
+# AWS Configuration
+aws_region = config.get('aws', 'aws_region_name')
+aws_account_id = config.get('aws', 'account_id')
+
+# Glacier Configuration
+vault_name = config.get('glacier', 'vault_name')
+
+
+# SQS Configuration
+sqs_restore_queue_url = config.get('sqs', 'restore_queue_url')
+thaw_completion_topic_arn = config.get('sns', 'restore_completion_topic_arn')
+
+# Initialize AWS clients
+sqs = boto3.client('sqs', region_name=aws_region)
+glacier_client = boto3.client('glacier', region_name=aws_region)
+dynamodb = boto3.resource('dynamodb', region_name=aws_region)
+table = dynamodb.Table('jcorning_annotations')
+
+def poll_sqs():
+    """Poll the SQS queue for messages and process them."""
+    while True:
+        response = sqs.receive_message(
+            QueueUrl=sqs_restore_queue_url,
+            MaxNumberOfMessages=10,
+            WaitTimeSeconds=20,
+            MessageAttributeNames=['All']
+        )
+
+        if 'Messages' in response:
+            for message in response['Messages']:
+                print("Received message:", message['Body'])
+                message_body = json.loads(message['Body'])
+
+                # Print the message body to debug the structure
+                print("Message Body:", message_body)
+
+                # Extract the actual message which contains user details
+                if 'Message' not in message_body:
+                    print("Error: 'Message' key not found in message body. Skipping message.")
+                    continue  # Skip this message
+
+                # Extract and parse the nested message
+                try:
+                    actual_message = json.loads(message_body['Message'])
+                    default_message = json.loads(actual_message['default'])
+                except json.JSONDecodeError as e:
+                    print(f"Error decoding JSON: {e}")
+                    continue  # Skip this message
+
+                if 'user_id' not in default_message:
+                    print("Error: 'user_id' key not found in actual message. Skipping message.")
+                    continue  # Skip this message
+
+                user_id = default_message['user_id']
+
+                # Process the restoration request for the user_id
+                restore_user_data(user_id)
+
+                # After processing, delete the message from the queue
+                sqs.delete_message(
+                    QueueUrl=sqs_restore_queue_url,
+                    ReceiptHandle=message['ReceiptHandle']
+                )
+
+        else:
+            print("No messages in queue. Waiting...")
+
+def restore_user_data(user_id):
+    """Function to handle the restoration process for a user_id."""
+    print(f"Restoring data for user_id: {user_id}")
+    
+    # Scan for all archived objects associated with the user_id
+    try:
+        response = table.scan(
+            FilterExpression=Key('user_id').eq(user_id)
+        )
+    except ClientError as e:
+        print(f"Error scanning DynamoDB: {e}")
+        return
+
+    if 'Items' not in response or not response['Items']:
+        print(f"No archived objects found for user_id: {user_id}")
+        return
+
+    archived_items = response['Items']
+
+    for item in archived_items:
+        if 'results_file_archive_id' in item:
+            initiate_glacier_retrieval(item)
+        else:
+            print(f"No results_file_archive_id found for item with user_id: {user_id}")
+
+
+def initiate_glacier_retrieval(item):
+    archive_id = item['results_file_archive_id']
+    gas_job_Id = item['job_id']
+    try:
+        # Attempt expedited retrieval first
+        print(f"Initiating expedited retrieval for archive_id: {archive_id}")
+        response = glacier_client.initiate_job(
+            accountId=aws_account_id,
+            vaultName=vault_name,
+            jobParameters={
+                'Type': 'archive-retrieval',
+                'ArchiveId': archive_id,
+                'Description': 'Expedited retrieval',
+                'Tier': 'Expedited',
+                'SNSTopic': thaw_completion_topic_arn
+            }
+        )
+        
+        glacier_restore_job_id = response['jobId']
+        print(f"Initiated expedited retrieval job with ID: {glacier_restore_job_id}")
+        # Update DynamoDB with the Glacier archive ID
+        table.update_item(
+            Key={'job_id': gas_job_Id},
+            UpdateExpression='SET glacier_restore_job_id = :glacier_restore_job_id',
+            ExpressionAttributeValues={':glacier_restore_job_id': glacier_restore_job_id}
+        )
+        return glacier_restore_job_id
+    except ClientError as e:
+        # If expedited retrieval fails, revert to standard retrieval
+        if e.response['Error']['Code'] == 'InsufficientCapacityException':
+            print(f"Expedited retrieval failed for archive_id: {archive_id}. Initiating standard retrieval.")
+            try:
+                response = glacier_client.initiate_job(
+                    accountId=aws_account_id,
+                    vaultName=vault_name,
+                    jobParameters={
+                            'Type': 'archive-retrieval',
+                            'ArchiveId': archive_id,
+                            'Description': 'Standard retrieval',
+                            'Tier': 'Standard',
+                            'SNSTopic': thaw_completion_topic_arn
+                    }
+                )
+                glacier_restore_job_id = response['jobId']
+                print(f"Initiated expedited retrieval job with ID: {glacier_restore_job_id}")
+                # Update DynamoDB with the Glacier archive ID
+                table.update_item(
+                    Key={'job_id': gas_job_Id},
+                    UpdateExpression='SET glacier_restore_job_id = :glacier_restore_job_id',
+                    ExpressionAttributeValues={':glacier_restore_job_id': glacier_restore_job_id}
+                )
+                return glacier_restore_job_id
+            except ClientError as e:
+                print(f"Standard retrieval failed for archive_id: {archive_id}. Error: {e}")
+        else:
+            print(f"Error initiating expedited retrieval for archive_id: {archive_id}. Error: {e}")
+
+if __name__ == '__main__':
+    poll_sqs()
