@@ -31,7 +31,7 @@ vault_name = config.get('glacier', 'vault_name')
 
 # SQS Configuration
 sqs_restore_queue_url = config.get('sqs', 'restore_queue_url')
-thaw_completion_topic_arn = config.get('sns', 'restore_completion_topic_arn')
+thaw_completion_topic_arn = config.get('sns', 'thaw_completion_topic_arn')
 
 # Initialize AWS clients
 sqs = boto3.client('sqs', region_name=aws_region)
