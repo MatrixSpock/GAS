@@ -97,12 +97,11 @@ def restore_user_data(user_id):
     print(f"Restoring data for user_id: {user_id}")
     
     try:
-        response = table.query(
-            IndexName='user_id_index',  # Replace with your index name
-            KeyConditionExpression=Key('user_id').eq(user_id)
+        response = table.scan(
+            FilterExpression=Key('user_id').eq(user_id)
         )
     except ClientError as e:
-        print(f"Error querying DynamoDB: {e}")
+        print(f"Error scanning DynamoDB: {e}")
         return
 
     if 'Items' not in response or not response['Items']:
@@ -142,7 +141,7 @@ def initiate_glacier_retrieval(item):
             UpdateExpression='SET glacier_restore_job_id = :glacier_restore_job_id',
             ExpressionAttributeValues={':glacier_restore_job_id': glacier_restore_job_id}
         )
-
+        
     except ClientError as e:
         if e.response['Error']['Code'] == 'InsufficientCapacityException':
             print(f"Expedited retrieval failed for archive_id: {archive_id}. Initiating standard retrieval.")
